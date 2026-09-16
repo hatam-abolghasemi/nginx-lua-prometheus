@@ -6,6 +6,15 @@ This is a Lua library that can be used with Nginx to keep track of metrics and
 expose them on a separate web page to be pulled by
 [Prometheus](https://prometheus.io).
 
+> **This is a fork.** The library above is unmodified upstream code from
+> [knyar/nginx-lua-prometheus](https://github.com/knyar/nginx-lua-prometheus).
+> This fork adds a reference `default.conf` under
+> [`examples/openresty-sidecar/`](examples/openresty-sidecar/) — a
+> sidecar-style exporter plus forward proxy built entirely on this library's
+> public API. See [`FORK.md`](FORK.md) for a full technical breakdown of each
+> addition: what it does, why it exists, its requirements, how to verify it,
+> and the assumptions it makes about your environment.
+
 ## Installation
 
 To use this library, you will need the [ngx_lua](
