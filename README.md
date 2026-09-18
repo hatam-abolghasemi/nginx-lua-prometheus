@@ -8,10 +8,10 @@ expose them on a separate web page to be pulled by
 
 > **This is a fork.** The library above is unmodified upstream code from
 > [knyar/nginx-lua-prometheus](https://github.com/knyar/nginx-lua-prometheus).
-> This fork adds a reference `default.conf` under
+> This fork adds a reference `default.conf` and `stream.conf` under
 > [`examples/openresty-sidecar/`](examples/openresty-sidecar/) — a
-> sidecar-style exporter plus forward proxy built entirely on this library's
-> public API. See [`FORK.md`](FORK.md) for a full technical breakdown of each
+> sidecar-style HTTP/stream exporter plus forward proxy built entirely on
+> this library's public API. See [`FORK.md`](FORK.md) for a full technical breakdown of each
 > addition: what it does, why it exists, its requirements, how to verify it,
 > and the assumptions it makes about your environment.
 

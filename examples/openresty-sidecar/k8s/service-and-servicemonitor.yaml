@@ -1,0 +1,52 @@
+# Sample Service + ServiceMonitor exposing both metrics endpoints this
+# fork's config produces: HTTP metrics on :80/metrics (default.conf) and
+# stream metrics on :9254/metrics (stream.conf). The ServiceMonitor requires
+# the Prometheus Operator CRDs (monitoring.coreos.com/v1) and a Prometheus
+# whose serviceMonitorSelector matches the app.kubernetes.io/instance label
+# below -- adjust that label (or the operator's selector) to match your
+# actual Prometheus instance.
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-app
+  namespace: example-namespace
+  labels:
+    app.kubernetes.io/name: example-app
+    app.kubernetes.io/component: app
+spec:
+  selector:
+    app.kubernetes.io/name: example-app
+    app.kubernetes.io/component: app
+  ports:
+  - name: app
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  - name: stream-metrics
+    port: 9254
+    targetPort: 9254
+    protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: example-app
+  namespace: example-namespace
+  labels:
+    app.kubernetes.io/name: example-app
+    app.kubernetes.io/instance: prometheus-example  # mock -- must match your Prometheus's serviceMonitorSelector
+spec:
+  namespaceSelector:
+    matchNames:
+    - example-namespace
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: example-app
+      app.kubernetes.io/component: app
+  endpoints:
+  - port: app             # HTTP request/connection metrics -- see FORK.md sections 1-9
+    path: /metrics
+    interval: 15s
+  - port: stream-metrics   # TCP/UDP proxy metrics -- see FORK.md section 10
+    path: /metrics
+    interval: 15s

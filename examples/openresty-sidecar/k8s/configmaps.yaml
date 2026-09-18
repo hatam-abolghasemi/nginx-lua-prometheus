@@ -1,0 +1,396 @@
+# Sanitized, mock-data ConfigMaps wrapping this fork's example config for
+# deployment as a Kubernetes sidecar. Nothing here is fork-specific logic --
+# the actual metrics/routing code lives in ../nginx.conf, ../default.conf,
+# ../stream.conf, and ../../../lib/metrics_config.lua; this file just
+# packages that same content as ConfigMaps so it can be mounted into a Pod
+# (see deployment.yaml).
+#
+# sidecar-metrics-config is the odd one out: it's the only lib/*.lua file
+# shipped as a ConfigMap rather than baked into the nginx image, precisely
+# because it's the one lib/ file meant to change per deployment (see
+# lib/metrics_config.lua's own header comment). Everything else under
+# lib/ -- http_metrics.lua, stream_metrics.lua, and the six pure modules --
+# is generic code, versioned with the image tag like any other library.
+#
+# These four files ARE those ConfigMaps' `data:` -- to avoid the two
+# copies drifting apart, regenerate this instead of hand-editing it once
+# you've changed the source files:
+#
+#   kubectl create configmap sidecar-nginx-conf     --from-file=../nginx.conf              --dry-run=client -o yaml > configmaps.yaml
+#   kubectl create configmap sidecar-default-conf   --from-file=../default.conf            --dry-run=client -o yaml >> configmaps.yaml
+#   kubectl create configmap sidecar-stream-conf    --from-file=../stream.conf             --dry-run=client -o yaml >> configmaps.yaml
+#   kubectl create configmap sidecar-metrics-config --from-file=../../../lib/metrics_config.lua --dry-run=client -o yaml >> configmaps.yaml
+#
+# (then add --- separators and the namespace/labels back in, or wrap the
+# four `kubectl create configmap --dry-run` commands in a small script --
+# either way, treat this file as generated, not authored.)
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sidecar-nginx-conf
+  namespace: example-namespace
+  labels:
+    app.kubernetes.io/name: example-app
+    app.kubernetes.io/component: nginx-sidecar
+data:
+  nginx.conf: |
+    # Reference top-level nginx.conf that wires default.conf (HTTP) and
+    # stream.conf (TCP/UDP) together. Nothing in this file is fork-specific --
+    # it's the plain skeleton every OpenResty deployment needs; default.conf and
+    # stream.conf are where this fork's actual additions live. See ../../FORK.md.
+    #
+    # Deployment layout assumed:
+    #   /etc/nginx/nginx.conf              (this file)
+    #   /etc/nginx/conf.d/default.conf     (this fork's HTTP config)
+    #   /etc/nginx/stream.d/stream.conf    (this fork's stream config; omit the
+    #                                        `stream { }` block below entirely
+    #                                        if you have no TCP/UDP destinations)
+
+    worker_processes             1;
+    worker_rlimit_nofile         2048;
+    pid                           /run/nginx.pid;
+    error_log                     /dev/stderr warn;
+    include                       /etc/nginx/modules-enabled/*.conf;
+
+    events {
+        worker_connections        1024;
+        use                       epoll;
+    }
+
+    http {
+        include                   /usr/local/openresty/nginx/conf/mime.types;
+        default_type              application/octet-stream;
+        server_tokens             off;
+        sendfile                  on;
+        tcp_nopush                on;
+        tcp_nodelay               on;
+        keepalive_timeout         30;
+        keepalive_requests        10000;
+        client_body_timeout       30;
+        send_timeout              15;
+        reset_timedout_connection on;
+        real_ip_header            X-Forwarded-For;
+        real_ip_recursive         on;
+
+        # default.conf (lua_shared_dict, lua_package_path, and all server{}
+        # blocks) is dropped here.
+        include                   /etc/nginx/conf.d/*.conf;
+    }
+
+    stream {
+        # stream.conf (lua_shared_dict, lua_package_path, and all server{}
+        # blocks) is dropped here. Omit this whole `stream { }` block if you
+        # have no TCP/UDP destinations to proxy.
+        include                   /etc/nginx/stream.d/*.conf;
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sidecar-default-conf
+  namespace: example-namespace
+  labels:
+    app.kubernetes.io/name: example-app
+    app.kubernetes.io/component: nginx-sidecar
+data:
+  default.conf: |
+    # Reference sidecar config: inbound request metrics (via nginx-lua-prometheus)
+    # with caller identification, plus an outbound forward proxy sharing the
+    # same metrics pipeline. All the actual logic lives in lib/http_metrics.lua
+    # (orchestration) and lib/metrics_config.lua (everything you'd customize)
+    # -- this file is just wiring + the server{} blocks. See ../../FORK.md for
+    # a full explanation of each piece: what it does, why, its requirements,
+    # and how to verify it.
+    #
+    # Deployment layout assumed by lua_package_path below:
+    #   /opt/prometheus/prometheus.lua              (upstream library)
+    #   /opt/prometheus/prometheus_keys.lua
+    #   /opt/prometheus/prometheus_resty_counter.lua
+    #   /opt/prometheus/lib/http_metrics.lua         (this fork's modules)
+    #   /opt/prometheus/lib/metrics_config.lua       -- edit this one for your environment
+    #   /opt/prometheus/lib/route_sanitizer.lua
+    #   /opt/prometheus/lib/host_classifier.lua
+    #   /opt/prometheus/lib/client_subnet.lua
+    #   /opt/prometheus/lib/gauge_expiry.lua
+    #   /opt/prometheus/lib/source_attribution.lua
+    #   /opt/prometheus/lib/app_toggle.lua
+    #
+    # Replace every example value in lib/metrics_config.lua (app/namespace
+    # names, IP ranges, resolver IP) with your own before deploying.
+
+    lua_shared_dict ptr_cache        1M;
+    lua_shared_dict prometheus_metrics 3M;
+    lua_shared_dict custom_metrics   1M;
+    lua_package_path "/opt/prometheus/?.lua;/opt/prometheus/lib/?.lua;;";
+
+    init_worker_by_lua_block { require("http_metrics").init() }
+    access_by_lua_block      { require("http_metrics").classify_source() }
+    log_by_lua_block         { require("http_metrics").record() }
+
+    # ── outbound (forward-proxy) leg ──────────────────────────────────────────
+    # Loopback-only. Requires an OpenResty build patched with
+    # ngx_http_proxy_connect_module (not in stock OpenResty) -- see FORK.md
+    # section 8. Point the application container's HTTP_PROXY/HTTPS_PROXY at
+    # 127.0.0.1:3128 to route its outbound calls through here.
+    server {
+        set                            $request_mode 1;
+        listen                         127.0.0.1:3128;
+        resolver                       10.233.0.3 valid=10s;  -- replace with your CoreDNS ClusterIP
+        resolver_timeout               5s;
+
+        proxy_connect;
+        proxy_connect_allow            all;  -- intentionally permissive: outbound TLS in this environment isn't confined to port 443, and plain HTTP requests already flow through location / below regardless of this setting -- see FORK.md section 8
+        proxy_connect_connect_timeout  10s;
+        proxy_connect_read_timeout     10s;
+        proxy_connect_send_timeout     10s;
+
+        location / {
+            proxy_pass                 $scheme://$http_host$request_uri;
+            proxy_set_header           Host $http_host;
+            proxy_http_version         1.1;
+            proxy_set_header           Connection "";
+        }
+    }
+
+    # ── inbound (reverse-proxy) leg ───────────────────────────────────────────
+    # Replace `proxy_pass http://app;` with your actual upstream (fastcgi_pass,
+    # a different proxy_pass target, etc.) -- this block intentionally has no
+    # application-specific routing in it.
+    upstream app {
+        server 127.0.0.1:9000;
+    }
+
+    server {
+        set                             $request_mode 0;
+        listen                          80 default_server;
+        server_name                     _;
+
+        location / {
+            proxy_pass                 http://app;
+            proxy_set_header           Host $host;
+            proxy_set_header           X-Real-IP $remote_addr;
+            proxy_set_header           X-Forwarded-For $remote_addr;
+            proxy_set_header           X-Forwarded-Proto $scheme;
+        }
+
+        location /nginx_status {
+            stub_status                 on;
+            access_log                  off;
+            allow                       172.16.0.0/12;  -- replace with your internal range
+            deny                        all;
+        }
+
+        location = /metrics {
+            content_by_lua_block { require("http_metrics").collect() }
+            access_log                  off;
+        }
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sidecar-stream-conf
+  namespace: example-namespace
+  labels:
+    app.kubernetes.io/name: example-app
+    app.kubernetes.io/component: nginx-sidecar
+data:
+  stream.conf: |
+    # Reference stream (TCP/UDP proxy) metrics config -- the stream-side
+    # counterpart to default.conf. All the actual logic lives in
+    # lib/stream_metrics.lua (orchestration) and lib/metrics_config.lua
+    # (everything you'd customize) -- this file is just wiring + the server{}
+    # blocks. See ../../FORK.md section 10 for a full explanation.
+    #
+    # nginx cannot share a shared dict between the http and stream modules (see
+    # the upstream README's "Usage in stream module" caveat), so this keeps its
+    # own Prometheus registry and its own exposition port (9254) rather than
+    # reusing prometheus_metrics/:80's /metrics.
+    #
+    # Deployment layout assumed by lua_package_path below (same package_path as
+    # default.conf -- these directives are per-module, so both http and stream
+    # need their own copies if you're running both):
+    #   /opt/prometheus/prometheus.lua              (upstream library)
+    #   /opt/prometheus/prometheus_keys.lua
+    #   /opt/prometheus/prometheus_resty_counter.lua
+    #   /opt/prometheus/lib/stream_metrics.lua       (this fork's modules)
+    #   /opt/prometheus/lib/metrics_config.lua       -- edit this one for your environment
+    #   /opt/prometheus/lib/gauge_expiry.lua
+    #   /opt/prometheus/lib/app_toggle.lua
+    #
+    # This file is meant to be dropped where your nginx.conf's `stream { }`
+    # block includes it, e.g. `stream { include /etc/nginx/stream.d/*.conf; }`.
+    # Replace all example values in lib/metrics_config.lua (destination names,
+    # resolver IP) with your own, and every `proxy_pass`/`resolver`/`listen`
+    # below, before deploying.
+
+    lua_shared_dict stream_metrics        3M;
+    lua_shared_dict stream_custom_metrics 1M;
+    lua_package_path "/opt/prometheus/?.lua;/opt/prometheus/lib/?.lua;;";
+
+    init_worker_by_lua_block { require("stream_metrics").init() }
+
+    # ── proxied destinations ──────────────────────────────────────────────────
+    # One server{} block per destination, each with its own log_by_lua_block
+    # (deliberately per-server, not shared at the top of this file, so the
+    # metrics-exposition server below never triggers it and never gets recorded
+    # as a phantom "destination" of its own). $destination_name feeds the
+    # "destination" label and the cfg.apps.stream per-destination switch in
+    # lib/metrics_config.lua -- give each destination you add its own entry
+    # there if you want to be able to disable its metrics independently.
+    server {
+        listen                127.0.0.1:16379;  -- replace with your loopback/listen address
+        set                   $destination_name "redis";
+        proxy_pass            redis-cluster-headless:6379;  -- replace with your upstream
+        resolver              10.233.0.3 valid=10s;  -- replace with your CoreDNS ClusterIP
+
+        log_by_lua_block { require("stream_metrics").record() }
+    }
+
+    # ── metrics exposition ────────────────────────────────────────────────────
+    # Separate port because this is a separate Prometheus registry from the one
+    # on :80/metrics -- point a distinct Prometheus scrape job at this port.
+    server {
+        listen                9254;
+        content_by_lua_block {
+            ngx.print(require("stream_metrics").metric_data())
+        }
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sidecar-metrics-config
+  namespace: example-namespace
+  labels:
+    app.kubernetes.io/name: example-app
+    app.kubernetes.io/component: nginx-sidecar
+data:
+  metrics_config.lua: |
+    -- metrics_config.lua
+    -- All environment-specific values for this fork's HTTP and stream metrics
+    -- (app/namespace names, which metrics and labels are enabled, histogram
+    -- buckets, source-attribution ranges, per-app toggles) in one place.
+    --
+    -- This is the one file under lib/ meant to be edited per deployment --
+    -- every other lib/*.lua module is generic code with no environment-specific
+    -- values in it. Being plain data (a table, no logic), it's also a natural
+    -- fit for shipping via its own ConfigMap if you want config changes to not
+    -- require rebuilding the nginx image -- see examples/openresty-sidecar/k8s/.
+    --
+    -- Consumed by lib/http_metrics.lua (the `http` and `apps` tables) and
+    -- lib/stream_metrics.lua (the `stream` and `apps.stream` tables).
+    --
+    -- Replace every example value below (app/namespace names, IP ranges,
+    -- resolver IP, static_ranges zone map) with your own before deploying.
+
+    return {
+        -- per-app / per-destination metrics master switches (lib/app_toggle.lua)
+        -- -- an app/destination with no entry here defaults to enabled. The
+        -- proxy/traffic itself keeps running regardless of this switch; it only
+        -- stops metrics being recorded for that leg.
+        apps = {
+            forward_proxy = { metrics_enabled = true },  -- checked by http_metrics.lua
+            stream = {                                    -- checked by stream_metrics.lua, keyed by destination_name
+                redis = { metrics_enabled = true },
+            },
+        },
+
+        http = {
+            app                                  = "example-app",
+            namespace                            = "example-namespace",
+            expiry_window                        = 10,
+            expiry_scan_limit                    = 10000,  -- bounds get_keys(); unbounded scans block all workers under high cardinality
+            cluster_ip_prefix                    = "10.233.",  -- must end in "."; verify per-cluster
+
+            metric_requests                      = true,
+            metric_latency                       = true,
+            metric_latency_hist                  = true,
+            metric_request_size                  = true,
+            metric_request_size_histogram        = false,
+            metric_response_size                 = true,
+            metric_response_size_histogram       = false,
+            metric_connections                   = true,
+            metric_connection_requests           = true,
+            metric_connection_requests_histogram = false,
+            metric_connection_time               = true,
+            metric_connection_time_histogram     = false,
+
+            histogram_buckets                    = {0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 2.5, 5, 10},
+            histogram_buckets_req_size           = {64, 256, 1024, 4096, 16384, 65536, 262144, 1048576},
+            histogram_buckets_res_size           = {64, 256, 1024, 4096, 16384, 65536, 262144, 1048576},
+            histogram_buckets_conn_requests      = {1, 2, 5, 10, 25, 50, 100, 250},
+            histogram_buckets_conn_time          = {0.1, 0.5, 1, 5, 15, 30, 60, 300},
+
+            label_method           = true,
+            label_route            = true,
+            label_status           = true,
+            label_app              = false,
+            label_namespace        = false,
+            label_client_subnet    = false,  -- remote_addr as x.x.x.0/24; source_service/namespace below is usually the more useful label
+            label_host             = true,
+            label_mode             = true,   -- 0 = reverse-proxy/incoming, 1 = forward-proxy/outgoing
+            label_source_service   = true,
+            label_source_namespace = true,
+
+            -- passed straight through to route_sanitizer.sanitize()
+            sanitize = {
+                pure_numeric      = true,
+                uuid              = true,
+                hex               = true,
+                slug_suffix_digit = true,
+                long_with_digit   = true,
+                file_extension    = true,
+                min_len           = 4,
+                max_segment_len   = 64,
+            },
+
+            -- passed straight through to source_attribution.new_resolver()
+            dynamic_prefix   = {10, 233},   -- pod CIDR: too dynamic for a static table, deferred to PTR
+            static_ranges = {
+                { prefix = {192, 168}, label = "internal",
+                  zone_map = { [104] = "zone_a", [108] = "zone_a", [116] = "zone_a",
+                               [140] = "zone_b", [141] = "zone_b", [142] = "zone_b",
+                               [200] = "zone_c", [201] = "zone_c",
+                               [212] = "zone_d", [213] = "zone_d" } },
+            },
+            default_label     = "public",
+            default_namespace = "unknown",
+
+            ptr_dns_server           = "10.233.0.3",  -- your CoreDNS ClusterIP; fetch per-cluster, do not hardcode in production
+            ptr_dns_timeout          = 200,   -- ms; kept tight, falls back to defaults on timeout
+            ptr_cache_ttl            = 15,    -- seconds, matches CoreDNS record TTL
+            probe_default_service    = "health-probe",  -- fallback for unresolved dynamic-range addresses (often kubelet probes)
+            probe_default_namespace  = "default",
+            waypoint_service_name    = "waypoint",  -- must match the Service name your mesh's waypoint Gateway creates
+        },
+
+        stream = {
+            expiry_window     = 10,
+            expiry_scan_limit = 10000,
+
+            metric_connections_total           = true,
+            metric_bytes_sent                  = true,
+            metric_bytes_received              = true,
+            metric_session_duration            = true,   -- histogram
+            metric_session_duration_gauge      = true,    -- gauge, last value (companion to the histogram)
+            metric_upstream_connect_time_gauge = true,    -- gauge, last value
+            metric_upstream_connect_time_hist  = true,    -- histogram
+            metric_connections_active          = true,
+            metric_upstream_bytes_sent         = true,
+            metric_upstream_bytes_received     = true,
+            metric_upstream_first_byte_time    = true,
+
+            label_destination    = true,
+            label_upstream_addr  = true,
+            label_status         = true,
+
+            histogram_buckets_session_duration = {0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 30, 60},
+            histogram_buckets_connect_time     = {0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1},
+        },
+    }
