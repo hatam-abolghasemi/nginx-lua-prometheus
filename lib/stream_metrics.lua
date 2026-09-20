@@ -73,6 +73,14 @@ local function classify_source()
     return resolver.default_service, resolver.default_namespace
 end
 
+-- Appends the enabled source label values to `labels`, in schema order.
+local function append_source(labels, svc, ns)
+    if not source_on then return labels end
+    if cfg.label_source_service   then table.insert(labels, svc or "unknown") end
+    if cfg.label_source_namespace then table.insert(labels, ns  or "unknown") end
+    return labels
+end
+
 -- Source for the current session, safe in the log phase (no cosockets): what
 -- preread stored, else a cheap local answer so the label count always matches.
 local function source_values()
@@ -87,6 +95,16 @@ local function build_label_schema()
     if cfg.label_destination   then table.insert(l, "destination")    end
     if cfg.label_upstream_addr then table.insert(l, "upstream_addr")  end
     if cfg.label_status        then table.insert(l, "status")         end
+    if source_on and cfg.label_source_service   then table.insert(l, "source_service")   end
+    if source_on and cfg.label_source_namespace then table.insert(l, "source_namespace") end
+    return l
+end
+
+-- {"state"} plus the source labels: the gauge is +1 at preread and -1 at log,
+-- and both must hit the SAME series, so connection_open() stores the exact
+-- label array it used in ngx.ctx and record() decrements with that.
+local function build_active_schema()
+    local l = {"state"}
     if source_on and cfg.label_source_service   then table.insert(l, "source_service")   end
     if source_on and cfg.label_source_namespace then table.insert(l, "source_namespace") end
     return l
@@ -161,7 +179,7 @@ function _M.init()
     if cfg.metric_connections_active then
         metric_stream_connections_active = prometheus_stream:gauge(
             "nginx_stream_connections_active",
-            "Currently open proxied stream connections", {"state"})
+            "Currently open proxied stream connections", build_active_schema())
     end
     if cfg.metric_upstream_bytes_sent then
         metric_stream_upstream_bytes_sent = prometheus_stream:counter(
@@ -216,19 +234,23 @@ function _M.connection_open()
     end
 
     if metric_stream_connections_active then
-        -- remember that this session was counted, so record() only
-        -- decrements sessions that were actually incremented (a server{}
+        local labels = append_source({"active"},
+            ngx.ctx.stream_source_service, ngx.ctx.stream_source_namespace)
+        -- remember exactly which series was incremented, so record() only
+        -- decrements sessions that were actually counted -- and on that same
+        -- series even if the own identity changes mid-session (a server{}
         -- missing its preread hook, or a toggled-off destination, can't
         -- drive it negative).
-        ngx.ctx.stream_active_counted = true
-        metric_stream_connections_active:inc(1, {"active"})
+        ngx.ctx.stream_active_labels = labels
+        metric_stream_connections_active:inc(1, labels)
     end
 end
 
 function _M.record()
-    if ngx.ctx.stream_active_counted then
-        ngx.ctx.stream_active_counted = nil
-        metric_stream_connections_active:inc(-1, {"active"})
+    local active_labels = ngx.ctx.stream_active_labels
+    if active_labels then
+        ngx.ctx.stream_active_labels = nil
+        metric_stream_connections_active:inc(-1, active_labels)
     end
 
     -- per-destination master switch: an entry with no metrics_enabled (or
@@ -244,9 +266,7 @@ function _M.record()
     if cfg.label_upstream_addr then table.insert(labels, ngx.var.upstream_addr or "none") end
     if cfg.label_status        then table.insert(labels, ngx.var.status or "unknown") end
     if source_on then
-        local src_svc, src_ns = source_values()
-        if cfg.label_source_service   then table.insert(labels, src_svc or "unknown") end
-        if cfg.label_source_namespace then table.insert(labels, src_ns  or "unknown") end
+        append_source(labels, source_values())
     end
 
     if metric_stream_connections    then metric_stream_connections:inc(1, labels) end
