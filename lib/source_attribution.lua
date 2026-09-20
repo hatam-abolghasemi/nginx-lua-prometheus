@@ -232,4 +232,31 @@ function Resolver:resolve(ip)
   return svc, ns
 end
 
+-- PTR-only lookup: no static classification, no shared-dict cache or
+-- in-flight lock. Returns service, namespace when the PTR record names a
+-- Service (<pod>.<service>.<namespace>.svc.cluster.local.), otherwise nil --
+-- i.e. it never substitutes defaults, so a caller can tell "resolved" from
+-- "didn't resolve". Used by self_identity.lua to discover this pod's own
+-- Service; the per-request path stays on Resolver:resolve above.
+function Resolver:resolve_ptr(ip)
+  local query_name = ip and ptr_query_name(ip)
+  if not query_name then return nil end
+
+  local resolver_lib = self.resolver_lib or require("resty.dns.resolver")
+  local r = resolver_lib:new{
+    nameservers = self.dns.nameservers,
+    retrans     = self.dns.retrans or 1,
+    timeout     = self.dns.timeout_ms or 200,
+  }
+  if not r then return nil end
+
+  local pcall_ok, answers = pcall(r.query, r, query_name, { qtype = resolver_lib.TYPE_PTR })
+  local ptrdname = pcall_ok and answers and answers[1] and answers[1].ptrdname
+  if not ptrdname then return nil end
+
+  local svc, ns = _M.parse_ptr(ptrdname)
+  if svc and ns then return svc, ns end
+  return nil
+end
+
 return _M

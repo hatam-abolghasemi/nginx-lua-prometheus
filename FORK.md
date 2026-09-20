@@ -93,6 +93,23 @@ in the mTLS-verified `X-Forwarded-Client-Cert` header instead.
 > mesh can let XFCC reach this sidecar from anywhere other than verified
 > mTLS termination at the waypoint, this becomes a spoofing vector.
 
+**Own identity (`self_identity.lua`).** The same PTR mechanism also answers
+"who am I": at startup each pod finds its own IP (kubelet writes
+`<pod-ip> <pod-hostname>` into `/etc/hosts`), reverse-resolves it, and uses
+the Service name and namespace it gets back for the outbound leg's
+`source_service` and for every `app`/`namespace` label. That's what makes one
+shared config safe for several Deployments -- without it, a `metrics_config.lua`
+mounted into (say) both `app` and `consumers` pods can hold only one `app`
+value, so *every* pod reports itself as that one service. It's on by default
+(`http.discover_identity = true`); `http.app` / `http.namespace` become the
+fallback used until discovery succeeds. A pod only has a PTR record once it is
+a Ready endpoint of a Service, so discovery retries with backoff (5s doubling to
+60s) in a timer rather than once at boot, and a pod that never resolves (no PTR
+records, `hostNetwork`, no Service) simply keeps the fallback. When the identity
+changes from fallback to discovered, the `nginx_http_connections` series
+recorded under the fallback are deleted rather than left frozen. Counter
+series recorded under the fallback before discovery keep their history.
+
 ### Gauges that don't go stale
 
 Prometheus gauges don't self-expire — a gauge set once and never touched
@@ -227,22 +244,13 @@ unaffected — none of its files are touched here.
   Only `state="active"` is exported now; `reading`/`writing`/`waiting` have
   no stream equivalent and were removed. A `server{}` without the preread
   hook is simply not counted.
-- Changed `nginx_stream_connections_active` to be labelled by `destination`
-  instead of the constant `state="active"` (follows `label_destination`).
-  The labels used for the `+1` are stored in `ngx.ctx` and reused for the
-  `-1`, so the gauge can't drift if config changes mid-session.
-  `upstream_addr` is deliberately not on this gauge: it only exists once
-  nginx has connected to a peer, which is after `preread`. Selectors like
-  `{state="active"}` must drop the `state` matcher; `sum(...)` is unaffected.
-- Added `source_service` and `source_namespace` labels to every stream
-  metric, including the active gauge. Toggled by the new
-  `label_source_service` / `label_source_namespace` options in the `stream`
-  table of `lib/metrics_config.lua` (both default `true`). The values are
-  static, from `config.http.app` / `config.http.namespace`, not PTR-resolved:
-  every stream listener binds `127.0.0.1`, so the caller is always the pod's
-  own app (same attribution as the HTTP forward-proxy leg, `mode=1`). No
-  per-pod cardinality increase, but existing stream series are replaced on
-  rollout because they gain two labels.
+- Added `lib/self_identity.lua` and `Resolver:resolve_ptr()`: the pod's own
+  service/namespace is now discovered via PTR instead of read from
+  `metrics_config.lua`'s `http.app`/`http.namespace` (kept as fallback; turn off
+  with `http.discover_identity = false`). Fixes every pod sharing a config
+  reporting itself as one hard-coded service. `http_metrics.lua` now reads
+  identity through `own()` for the outbound `source_service`, the `app` and
+  `namespace` labels, and the connection gauges.
 
 ### 2026-09-18
 

@@ -18,6 +18,7 @@ local client_subnet      = require("client_subnet")
 local gauge_expiry       = require("gauge_expiry")
 local source_attribution = require("source_attribution")
 local app_toggle         = require("app_toggle")
+local self_identity      = require("self_identity")
 
 local config = require("metrics_config")
 local cfg    = config.http
@@ -35,6 +36,17 @@ local metric_connection_requests, metric_connection_requests_histogram
 local metric_connection_time, metric_connection_time_histogram
 local expiry
 local resolver
+local ident   -- this pod's own service/namespace, see own() below
+
+-- This pod's own service/namespace, used for the outbound leg's
+-- source_service and for every "app"/"namespace" label. With
+-- cfg.discover_identity it's discovered via PTR (lib/self_identity.lua) --
+-- cfg.app / cfg.namespace are then only the fallback until that resolves;
+-- without it they're used as-is. Safe in every phase.
+local function own()
+    if ident then return ident:get() end
+    return cfg.app, cfg.namespace
+end
 
 local function build_label_schema()
     local l = {}
@@ -61,8 +73,9 @@ local function build_labels(method, route, status, subnet, host, mode, source_se
     if cfg.label_mode              then table.insert(l, mode)             end
     if cfg.label_source_service    then table.insert(l, source_service)   end
     if cfg.label_source_namespace  then table.insert(l, source_namespace) end
-    if cfg.label_app               then table.insert(l, cfg.app)          end
-    if cfg.label_namespace         then table.insert(l, cfg.namespace)    end
+    local app, namespace = own()
+    if cfg.label_app               then table.insert(l, app)              end
+    if cfg.label_namespace         then table.insert(l, namespace)        end
     return l
 end
 
@@ -165,6 +178,27 @@ function _M.init()
         default_namespace  = cfg.default_namespace,
         default_service    = cfg.probe_default_service,
     }
+
+    -- ============================================================
+    -- Own identity -- see lib/self_identity.lua
+    -- ============================================================
+    if cfg.discover_identity then
+        ident = self_identity.new{
+            resolver           = resolver,
+            fallback_service   = cfg.app,
+            fallback_namespace = cfg.namespace,
+            -- nginx_http_connections is only ever set, never expired, so its
+            -- series under the fallback identity would freeze forever once
+            -- the real identity is found -- delete them.
+            on_change = function(old_svc, old_ns)
+                if not metric_connections then return end
+                for _, state in ipairs({"active", "reading", "writing", "waiting"}) do
+                    metric_connections:del({state, old_svc, old_ns})
+                end
+            end,
+        }
+        ident:start()
+    end
 end
 
 -- ============================================================
@@ -173,8 +207,7 @@ end
 function _M.classify_source()
     if ngx.var.request_mode == "1" then
         -- outbound (forward-proxy) leg: the caller is this pod itself
-        ngx.ctx.source_service   = cfg.app
-        ngx.ctx.source_namespace = cfg.namespace
+        ngx.ctx.source_service, ngx.ctx.source_namespace = own()
         return
     end
 
@@ -229,7 +262,8 @@ function _M.record()
     -- ── connection-level metrics (no route/method/status; a connection can carry multiple requests) ──
     local conn_reqs   = tonumber(ngx.var.connection_requests) or 1
     local conn_time   = tonumber(ngx.var.connection_time) or 0
-    local conn_labels = {cfg.app, cfg.namespace}
+    local app, namespace = own()
+    local conn_labels = {app, namespace}
 
     if metric_connection_requests           then metric_connection_requests:set(conn_reqs, conn_labels) end
     if metric_connection_requests_histogram then metric_connection_requests_histogram:observe(conn_reqs, conn_labels) end
@@ -241,19 +275,20 @@ function _M.record()
     end
 
     if metric_connections then
-        metric_connections:set(ngx.var.connections_active  or 0, {"active",  cfg.app, cfg.namespace})
-        metric_connections:set(ngx.var.connections_reading or 0, {"reading", cfg.app, cfg.namespace})
-        metric_connections:set(ngx.var.connections_writing or 0, {"writing", cfg.app, cfg.namespace})
-        metric_connections:set(ngx.var.connections_waiting or 0, {"waiting", cfg.app, cfg.namespace})
+        metric_connections:set(ngx.var.connections_active  or 0, {"active",  app, namespace})
+        metric_connections:set(ngx.var.connections_reading or 0, {"reading", app, namespace})
+        metric_connections:set(ngx.var.connections_writing or 0, {"writing", app, namespace})
+        metric_connections:set(ngx.var.connections_waiting or 0, {"waiting", app, namespace})
     end
 end
 
 -- exposed for the /metrics location on :80
 function _M.collect()
     if metric_connections then
-        metric_connections:set(ngx.var.connections_reading, {"reading", cfg.app, cfg.namespace})
-        metric_connections:set(ngx.var.connections_waiting, {"waiting", cfg.app, cfg.namespace})
-        metric_connections:set(ngx.var.connections_writing, {"writing", cfg.app, cfg.namespace})
+        local app, namespace = own()
+        metric_connections:set(ngx.var.connections_reading, {"reading", app, namespace})
+        metric_connections:set(ngx.var.connections_waiting, {"waiting", app, namespace})
+        metric_connections:set(ngx.var.connections_writing, {"writing", app, namespace})
     end
     prometheus:collect()
 end
