@@ -216,6 +216,18 @@ needed for the Lua side.
 Dated entries for this fork's own additions. Upstream's `CHANGELOG.md` is
 unaffected — none of its files are touched here.
 
+### 2026-09-20
+
+- Fixed `nginx_stream_connections_active` always reporting 0. It was read
+  from `$connections_active` and friends, which come from
+  `ngx_http_stub_status_module` and don't exist in the stream module (the
+  `or 0` fallback hid that). The gauge is now maintained by hand: `+1` from
+  the new `stream_metrics.connection_open()` (call it from
+  `preread_by_lua_block` in every stream `server{}`), `-1` from `record()`.
+  Only `state="active"` is exported now; `reading`/`writing`/`waiting` have
+  no stream equivalent and were removed. A `server{}` without the preread
+  hook is simply not counted.
+
 ### 2026-09-18
 
 - Added `lib/app_toggle.lua`, wired into `default.conf` (forward-proxy leg)

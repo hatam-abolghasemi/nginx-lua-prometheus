@@ -8,6 +8,7 @@
 --
 -- Wired up from stream.conf as:
 --   init_worker_by_lua_block { require("stream_metrics").init() }
+--   preread_by_lua_block     { require("stream_metrics").connection_open() }  -- inside each destination's server{}
 --   log_by_lua_block         { require("stream_metrics").record() }   -- inside each destination's server{}
 --   content_by_lua_block     { ngx.print(require("stream_metrics").metric_data()) }
 
@@ -82,7 +83,7 @@ function _M.init()
     if cfg.metric_connections_active then
         metric_stream_connections_active = prometheus_stream:gauge(
             "nginx_stream_connections_active",
-            "Active/reading/writing/waiting stream connections", {"state"})
+            "Currently open proxied stream connections", {"state"})
     end
     if cfg.metric_upstream_bytes_sent then
         metric_stream_upstream_bytes_sent = prometheus_stream:counter(
@@ -121,7 +122,30 @@ function _M.init()
     end
 end
 
+-- Call from preread_by_lua_block in every destination server{}.
+--
+-- nginx's stream module has no stub_status: $connections_active/reading/
+-- writing/waiting are HTTP-only variables and are nil here, so the gauge is
+-- maintained by hand -- +1 when a session starts (here), -1 when it ends
+-- (record(), from log_by_lua_block, which always runs at session close).
+-- Only the "active" state is meaningful for stream; reading/writing/waiting
+-- have no stream equivalent and are not exported.
+function _M.connection_open()
+    if not metric_stream_connections_active then return end
+    if not app_toggle.enabled(apps, ngx.var.destination_name) then return end
+    -- remember that this session was counted, so record() only decrements
+    -- sessions that were actually incremented (a server{} missing its
+    -- preread hook, or a toggled-off destination, can't drive it negative).
+    ngx.ctx.stream_active_counted = true
+    metric_stream_connections_active:inc(1, {"active"})
+end
+
 function _M.record()
+    if ngx.ctx.stream_active_counted then
+        ngx.ctx.stream_active_counted = nil
+        metric_stream_connections_active:inc(-1, {"active"})
+    end
+
     -- per-destination master switch: an entry with no metrics_enabled (or
     -- no entry at all) in metrics_config.apps.stream defaults to enabled -- see
     -- lib/app_toggle.lua.
@@ -163,13 +187,6 @@ function _M.record()
 
     if expiry and (metric_stream_upstream_connect_time_gauge or metric_stream_session_duration_gauge) then
         expiry:touch("stream_time", labels)
-    end
-
-    if metric_stream_connections_active then
-        metric_stream_connections_active:set(ngx.var.connections_active  or 0, {"active"})
-        metric_stream_connections_active:set(ngx.var.connections_reading or 0, {"reading"})
-        metric_stream_connections_active:set(ngx.var.connections_writing or 0, {"writing"})
-        metric_stream_connections_active:set(ngx.var.connections_waiting or 0, {"waiting"})
     end
 end
 
