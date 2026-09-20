@@ -112,9 +112,14 @@ return {
         metric_upstream_bytes_received     = true,
         metric_upstream_first_byte_time    = true,
 
-        label_destination    = true,
-        label_upstream_addr  = true,
-        label_status         = true,
+        label_destination      = true,
+        label_upstream_addr    = true,
+        label_status           = true,
+        -- Static, not PTR-resolved: every stream listener binds 127.0.0.1, so the
+        -- caller is always this pod's own app. Values come from config.http.app /
+        -- config.http.namespace (same as the HTTP forward-proxy leg, mode=1).
+        label_source_service   = true,
+        label_source_namespace = true,
 
         histogram_buckets_session_duration = {0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 30, 60},
         histogram_buckets_connect_time     = {0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1},

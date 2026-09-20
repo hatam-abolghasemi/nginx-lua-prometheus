@@ -19,6 +19,10 @@ local config = require("metrics_config")
 local cfg    = config.stream
 local apps   = config.apps.stream
 
+-- Stream listeners are loopback-only, so the "source" is this pod itself.
+local source_service   = config.http.app
+local source_namespace = config.http.namespace
+
 local _M = {}
 
 local prometheus_stream
@@ -40,11 +44,24 @@ local function build_label_schema()
     if cfg.label_destination   then table.insert(l, "destination")    end
     if cfg.label_upstream_addr then table.insert(l, "upstream_addr")  end
     if cfg.label_status        then table.insert(l, "status")         end
+    if cfg.label_source_service   then table.insert(l, "source_service")   end
+    if cfg.label_source_namespace then table.insert(l, "source_namespace") end
+    return l
+end
+
+-- The active-connections gauge can only use labels known at preread time
+-- (no upstream_addr / status yet).
+local function build_active_schema()
+    local l = {}
+    if cfg.label_destination      then table.insert(l, "destination")      end
+    if cfg.label_source_service   then table.insert(l, "source_service")   end
+    if cfg.label_source_namespace then table.insert(l, "source_namespace") end
     return l
 end
 
 function _M.init()
-    local label_schema = build_label_schema()
+    local label_schema  = build_label_schema()
+    local active_schema = build_active_schema()
 
     prometheus_stream = require("prometheus").init("stream_metrics")
 
@@ -83,7 +100,8 @@ function _M.init()
     if cfg.metric_connections_active then
         metric_stream_connections_active = prometheus_stream:gauge(
             "nginx_stream_connections_active",
-            "Currently open proxied stream connections", {"state"})
+            "Currently open proxied stream connections",
+            #active_schema > 0 and active_schema or nil)
     end
     if cfg.metric_upstream_bytes_sent then
         metric_stream_upstream_bytes_sent = prometheus_stream:counter(
@@ -128,22 +146,31 @@ end
 -- writing/waiting are HTTP-only variables and are nil here, so the gauge is
 -- maintained by hand -- +1 when a session starts (here), -1 when it ends
 -- (record(), from log_by_lua_block, which always runs at session close).
--- Only the "active" state is meaningful for stream; reading/writing/waiting
--- have no stream equivalent and are not exported.
+-- Labelled by destination + source_service/namespace only: those are known
+-- at preread time, whereas $upstream_addr does not exist until nginx has
+-- picked and connected to a peer (after this hook), so it can't be used here.
 function _M.connection_open()
     if not metric_stream_connections_active then return end
-    if not app_toggle.enabled(apps, ngx.var.destination_name) then return end
-    -- remember that this session was counted, so record() only decrements
-    -- sessions that were actually incremented (a server{} missing its
-    -- preread hook, or a toggled-off destination, can't drive it negative).
-    ngx.ctx.stream_active_counted = true
-    metric_stream_connections_active:inc(1, {"active"})
+    local destination = ngx.var.destination_name
+    if not app_toggle.enabled(apps, destination) then return end
+    -- remember that this session was counted, and with which labels, so
+    -- record() decrements exactly the series that was incremented (a
+    -- server{} missing its preread hook, or a toggled-off destination,
+    -- can't drive it negative or drift it).
+    local labels = {}
+    if cfg.label_destination      then table.insert(labels, destination)      end
+    if cfg.label_source_service   then table.insert(labels, source_service)   end
+    if cfg.label_source_namespace then table.insert(labels, source_namespace) end
+    if #labels == 0 then labels = nil end
+    ngx.ctx.stream_active = { labels = labels }
+    metric_stream_connections_active:inc(1, labels)
 end
 
 function _M.record()
-    if ngx.ctx.stream_active_counted then
-        ngx.ctx.stream_active_counted = nil
-        metric_stream_connections_active:inc(-1, {"active"})
+    local active = ngx.ctx.stream_active
+    if active then
+        ngx.ctx.stream_active = nil
+        metric_stream_connections_active:inc(-1, active.labels)
     end
 
     -- per-destination master switch: an entry with no metrics_enabled (or
@@ -158,6 +185,8 @@ function _M.record()
     if cfg.label_destination   then table.insert(labels, destination) end
     if cfg.label_upstream_addr then table.insert(labels, ngx.var.upstream_addr or "none") end
     if cfg.label_status        then table.insert(labels, ngx.var.status or "unknown") end
+    if cfg.label_source_service   then table.insert(labels, source_service)   end
+    if cfg.label_source_namespace then table.insert(labels, source_namespace) end
 
     if metric_stream_connections    then metric_stream_connections:inc(1, labels) end
     if metric_stream_bytes_sent     then metric_stream_bytes_sent:inc(tonumber(ngx.var.bytes_sent) or 0, labels) end

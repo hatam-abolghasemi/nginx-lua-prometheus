@@ -227,6 +227,22 @@ unaffected — none of its files are touched here.
   Only `state="active"` is exported now; `reading`/`writing`/`waiting` have
   no stream equivalent and were removed. A `server{}` without the preread
   hook is simply not counted.
+- Changed `nginx_stream_connections_active` to be labelled by `destination`
+  instead of the constant `state="active"` (follows `label_destination`).
+  The labels used for the `+1` are stored in `ngx.ctx` and reused for the
+  `-1`, so the gauge can't drift if config changes mid-session.
+  `upstream_addr` is deliberately not on this gauge: it only exists once
+  nginx has connected to a peer, which is after `preread`. Selectors like
+  `{state="active"}` must drop the `state` matcher; `sum(...)` is unaffected.
+- Added `source_service` and `source_namespace` labels to every stream
+  metric, including the active gauge. Toggled by the new
+  `label_source_service` / `label_source_namespace` options in the `stream`
+  table of `lib/metrics_config.lua` (both default `true`). The values are
+  static, from `config.http.app` / `config.http.namespace`, not PTR-resolved:
+  every stream listener binds `127.0.0.1`, so the caller is always the pod's
+  own app (same attribution as the HTTP forward-proxy leg, `mode=1`). No
+  per-pod cardinality increase, but existing stream series are replaced on
+  rollout because they gain two labels.
 
 ### 2026-09-18
 
