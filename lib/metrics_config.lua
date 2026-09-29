@@ -34,9 +34,9 @@ return {
         -- several Deployments. app / namespace below are then only the fallback used
         -- until discovery succeeds (or forever if it can't: no PTR records, hostNetwork).
         -- With discover_identity = false they're used as-is, so give each Deployment its own.
-        discover_identity                    = true,
-        app                                  = "example-app",
-        namespace                            = "example-namespace",
+        discover_identity                    = true,           -- own Service name via PTR, resolved once, then fixed
+        app                                  = "unknown",      -- reported only until the PTR lookup first succeeds
+        namespace                            = own_namespace,  -- read once from the SA file, see top of file
         expiry_window                        = 10,
         expiry_scan_limit                    = 10000,  -- bounds get_keys(); unbounded scans block all workers under high cardinality
         cluster_ip_prefix                    = "10.233.",  -- must end in "."; verify per-cluster

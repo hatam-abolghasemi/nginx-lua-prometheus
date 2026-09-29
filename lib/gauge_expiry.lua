@@ -48,7 +48,9 @@ end
 -- Decodes a tracking key back into its scope and ordered label values.
 function _M.decode_key(key)
   local parts = {}
-  for part in key:gmatch("[^|]+") do
+  -- "([^|]*)|" (not "[^|]+") so empty label values survive the round trip;
+  -- dropping them shifts the label count and breaks set(0, labels) on expiry.
+  for part in (key .. "|"):gmatch("([^|]*)|") do
     table.insert(parts, part)
   end
   local scope = parts[1]

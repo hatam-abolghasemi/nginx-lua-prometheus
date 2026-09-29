@@ -256,6 +256,7 @@ data:
     # Separate port because this is a separate Prometheus registry from the one
     # on :80/metrics -- point a distinct Prometheus scrape job at this port.
     server {
+        set                   $request_mode 0;
         listen                9254;
         content_by_lua_block {
             ngx.print(require("stream_metrics").metric_data())
@@ -290,6 +291,22 @@ data:
     -- Replace every example value below (app/namespace names, IP ranges,
     -- resolver IP, static_ranges zone map) with your own before deploying.
 
+    -- This pod's own namespace, read once from the service-account file kubelet
+    -- mounts -- available immediately, no DNS, nothing hardcoded. The Service
+    -- name has no local source, so it is discovered via PTR instead
+    -- (http.discover_identity below, lib/self_identity.lua).
+    local function read_trimmed(path)
+        local f = io.open(path, "r")
+        if not f then return nil end
+        local v = f:read("*a")
+        f:close()
+        v = v and v:match("^%s*(.-)%s*$")
+        if v == "" then return nil end
+        return v
+    end
+
+    local own_namespace = read_trimmed("/var/run/secrets/kubernetes.io/serviceaccount/namespace") or "unknown"
+
     return {
         -- per-app / per-destination metrics master switches (lib/app_toggle.lua)
         -- -- an app/destination with no entry here defaults to enabled. The
@@ -303,8 +320,9 @@ data:
         },
 
         http = {
-            app                                  = "example-app",
-            namespace                            = "example-namespace",
+            discover_identity                    = true,           -- own Service name via PTR, resolved once, then fixed
+            app                                  = "unknown",      -- reported only until the PTR lookup first succeeds
+            namespace                            = own_namespace,  -- read once from the SA file, see top of file
             expiry_window                        = 10,
             expiry_scan_limit                    = 10000,  -- bounds get_keys(); unbounded scans block all workers under high cardinality
             cluster_ip_prefix                    = "10.233.",  -- must end in "."; verify per-cluster

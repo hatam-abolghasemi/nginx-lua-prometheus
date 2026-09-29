@@ -147,7 +147,7 @@ function _M.init()
     -- scopes; see lib/gauge_expiry.lua
     -- ============================================================
     if cfg.metric_latency or cfg.metric_request_size or cfg.metric_response_size
-       or cfg.metric_connection_requests or cfg.metric_connection_time then
+    or cfg.metric_connection_requests or cfg.metric_connection_time then
         expiry = gauge_expiry.new{
             dict       = ngx.shared.custom_metrics,
             window     = cfg.expiry_window,
@@ -231,7 +231,11 @@ function _M.record()
     -- forward-proxy master switch: skip recording entirely for outbound
     -- (mode=1) traffic when disabled in metrics_config.apps.forward_proxy -- the proxy
     -- itself keeps running either way, see lib/app_toggle.lua.
-    if (ngx.var.request_mode or "0") == "1" and not app_toggle.enabled(apps, "forward_proxy") then
+    -- an unset $request_mode is "" (not nil) in servers that never `set` it
+    local request_mode = ngx.var.request_mode
+    if request_mode == nil or request_mode == "" then request_mode = "0" end
+
+    if request_mode == "1" and not app_toggle.enabled(apps, "forward_proxy") then
         return
     end
 
@@ -242,7 +246,7 @@ function _M.record()
     local res_size = tonumber(ngx.var.body_bytes_sent) or 0
     local subnet   = cfg.label_client_subnet and client_subnet.mask(ngx.var.http_x_forwarded_for or ngx.var.remote_addr) or nil
     local host     = cfg.label_host and host_classifier.classify(ngx.var.host, cfg.cluster_ip_prefix) or nil
-    local mode     = cfg.label_mode and (ngx.var.request_mode or "0") or nil
+    local mode     = cfg.label_mode and request_mode or nil
     local route    = route_sanitizer.sanitize(ngx.var.request_uri, cfg.sanitize)
 
     local labels = build_labels(method, route, status, subnet, host, mode, ngx.ctx.source_service, ngx.ctx.source_namespace)
