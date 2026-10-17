@@ -228,10 +228,69 @@ needed for the Lua side.
 
 ---
 
+## Prebuilt image
+
+`.github/workflows/openresty-image.yml` watches
+[openresty/docker-openresty](https://github.com/openresty/docker-openresty/tags)
+every 6 hours. When a new `<openresty-version>-<revision>` tag appears, it
+builds that tag's `alpine/Dockerfile` with `RESTY_VERSION` taken from the tag,
+layers this repo on top (`docker/Dockerfile`, wired together by
+`docker-bake.hcl`), smoke-tests it, and pushes:
+
+| Tag | Meaning |
+|---|---|
+| `ghcr.io/hatam-abolghasemi/nginx-lua-prometheus:<openresty-version>` | e.g. `1.31.1.1`: newest build for that OpenResty version |
+| `ghcr.io/hatam-abolghasemi/nginx-lua-prometheus:<upstream-tag>` | e.g. `1.31.1.1-4`: that docker-openresty release, rebuilt when this repo changes |
+| `ghcr.io/hatam-abolghasemi/nginx-lua-prometheus:<upstream-tag>-<sha7>` | immutable: that release + this commit |
+| `ghcr.io/hatam-abolghasemi/nginx-lua-prometheus:latest` | newest upstream release |
+
+Pushes to `main` that touch the Lua or `docker/` rebuild the newest upstream
+release; `workflow_dispatch` builds any tag (OpenResty 1.31+).
+
+Inside the image:
+
+- `/opt/prometheus/` holds `prometheus*.lua` and `lib/`; mount your own
+  `lib/metrics_config.lua` over the baked one, as before.
+- `/etc/nginx/nginx.conf` (`/usr/local/openresty/nginx/conf/nginx.conf` is a
+  symlink to it) and `/etc/nginx/conf.d/default.conf` are a transparent
+  default: `:80` reverse-proxies to `127.0.0.1:$APP_PORT` (default `8080`)
+  without touching the request, `127.0.0.1:3128` is the forward proxy, and
+  `:9145` serves `/metrics`, `/nginx_status` and `/healthz`.
+- Stream is off. Drop a file containing
+  `stream { include /etc/nginx/stream.d/*.conf; }` into `/etc/nginx/main.d/`
+  and your `stream.conf` into `/etc/nginx/stream.d/` to turn it on.
+
+The forward proxy uses nginx's native CONNECT support
+(`ngx_http_tunnel_module`, nginx 1.31+, built by default), so
+`ngx_http_proxy_connect_module` and its core patch are no longer needed. That
+patch does not apply to nginx 1.31 anyway, so OpenResty 1.31 can't be built
+with it.
+
+Local build from the Docker Hub image, no source compile:
+
+```
+docker buildx build \
+  --build-context openresty-base=docker-image://openresty/openresty:1.31.1.1-4-alpine \
+  -f docker/Dockerfile -t openresty-prometheus:local .
+```
+
+---
+
 ## Fork changelog
 
 Dated entries for this fork's own additions. Upstream's `CHANGELOG.md` is
 unaffected — none of its files are touched here.
+
+### 2026-10-17
+
+- Added `.github/workflows/openresty-image.yml`, `docker-bake.hcl` and
+  `docker/`: an image built from each new docker-openresty release with this
+  repo baked in (see "Prebuilt image" above).
+- `lib/metrics_config.lua`: restored the `own_namespace` lookup (lost in
+  `4da5d7e`, which left `http.namespace` as `nil` and made every
+  connection metric fail with "incorrect label count"), and
+  `ptr_dns_server` now defaults to the first nameserver in
+  `/etc/resolv.conf` instead of a hardcoded IP.
 
 ### 2026-09-20
 
