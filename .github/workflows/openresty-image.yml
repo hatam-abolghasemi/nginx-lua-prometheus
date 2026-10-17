@@ -1,0 +1,193 @@
+name: OpenResty image
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - prometheus.lua
+      - prometheus_keys.lua
+      - prometheus_resty_counter.lua
+      - lib/**
+      - docker/**
+      - docker-bake.hcl
+      - .dockerignore
+      - .github/workflows/openresty-image.yml
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: docker-openresty tag to build, e.g. 1.31.1.1-4 (empty = latest)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: openresty-image
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/openresty/docker-openresty.git
+  IMAGE: ghcr.io/${{ github.repository }}
+  MIN_RESTY_VERSION: 1.31.0.0
+  PLATFORMS: linux/amd64
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      resty_version: ${{ steps.resolve.outputs.resty_version }}
+      is_latest: ${{ steps.resolve.outputs.is_latest }}
+      is_newest_revision: ${{ steps.resolve.outputs.is_newest_revision }}
+    steps:
+      - id: resolve
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          all_tags=$(git ls-remote --tags --refs "$UPSTREAM_REPO" \
+            | awk -F/ '{print $3}' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' \
+            | sort -V)
+          latest=$(printf '%s\n' "$all_tags" | tail -n1)
+          tag="${REQUESTED_TAG:-$latest}"
+          if ! printf '%s' "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$'; then
+            echo "::error::'$tag' is not a <openresty-version>-<revision> tag"
+            exit 1
+          fi
+          resty_version="${tag%-*}"
+          lowest=$(printf '%s\n%s\n' "$MIN_RESTY_VERSION" "$resty_version" | sort -V | head -n1)
+          if [ "$lowest" != "$MIN_RESTY_VERSION" ]; then
+            echo "::error::OpenResty $resty_version bundles nginx < 1.31, which has no native CONNECT support (ngx_http_tunnel_module); default.conf needs it"
+            exit 1
+          fi
+          is_latest=false
+          [ "$tag" = "$latest" ] && is_latest=true
+          newest_revision=$(printf '%s\n' "$all_tags" | grep -F "$resty_version-" | tail -n1)
+          is_newest_revision=false
+          [ "$tag" = "$newest_revision" ] && is_newest_revision=true
+          {
+            echo "upstream_tag=$tag"
+            echo "resty_version=$resty_version"
+            echo "is_latest=$is_latest"
+            echo "is_newest_revision=$is_newest_revision"
+          } >> "$GITHUB_OUTPUT"
+          echo "upstream: $tag (OpenResty $resty_version), latest upstream: $latest"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: check
+        env:
+          UPSTREAM_TAG: ${{ steps.resolve.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "schedule" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if docker buildx imagetools inspect "$IMAGE:$UPSTREAM_TAG" > /dev/null 2>&1; then
+            echo "$IMAGE:$UPSTREAM_TAG already exists, nothing to do"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new upstream release $UPSTREAM_TAG, building"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      UPSTREAM_TAG: ${{ needs.detect.outputs.upstream_tag }}
+      RESTY_VERSION: ${{ needs.detect.outputs.resty_version }}
+      IS_LATEST: ${{ needs.detect.outputs.is_latest }}
+      IS_NEWEST_REVISION: ${{ needs.detect.outputs.is_newest_revision }}
+      GIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch docker-openresty ${{ env.UPSTREAM_TAG }}
+        run: git clone --quiet --depth 1 --branch "$UPSTREAM_TAG" "$UPSTREAM_REPO" docker-openresty
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build for smoke test
+        env:
+          TAGS: openresty-prometheus:smoke
+        run: |
+          docker buildx bake image \
+            --set '*.platform=linux/amd64' \
+            --set '*.cache-from=type=gha,scope=openresty' \
+            --set '*.cache-to=type=gha,scope=openresty,mode=max' \
+            --load
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke-app busybox:1.37 \
+            sh -c 'mkdir -p /www && echo app-ok > /www/index.html && httpd -f -p 8080 -h /www'
+          docker run -d --name smoke-nginx --network container:smoke-app openresty-prometheus:smoke
+          probe() { docker run --rm --network container:smoke-app curlimages/curl:8.16.0 -sS --retry 10 --retry-connrefused --retry-delay 1 -m 15 "$@"; }
+
+          docker exec smoke-nginx openresty -t
+
+          [ "$(probe http://127.0.0.1/)" = "app-ok" ]
+          [ "$(probe -o /dev/null -w '%{http_code}' -x http://127.0.0.1:3128 http://example.com/)" = "200" ]
+          [ "$(probe -o /dev/null -w '%{http_code}' -x http://127.0.0.1:3128 https://example.com/)" = "200" ]
+          [ "$(probe http://127.0.0.1:9145/healthz)" = "ok" ]
+
+          metrics=$(probe http://127.0.0.1:9145/metrics)
+          echo "$metrics" | grep -E '^nginx_http_requests_total'
+          echo "$metrics" | grep -q 'mode="0"'
+          echo "$metrics" | grep -q 'method="CONNECT".*mode="1"'
+          echo "$metrics" | grep -qx 'nginx_metric_errors_total 0'
+
+      - name: Smoke test logs
+        if: always()
+        run: |
+          docker logs smoke-nginx 2>&1 | tail -n 100 || true
+          if docker logs smoke-nginx 2>&1 | grep -E '\[(emerg|alert|crit)\]|runtime error|entry thread aborted'; then
+            echo "::error::nginx logged fatal or Lua runtime errors"
+            exit 1
+          fi
+
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          short_sha="${GIT_SHA::7}"
+          tags="$IMAGE:$UPSTREAM_TAG,$IMAGE:$UPSTREAM_TAG-$short_sha"
+          if [ "$IS_NEWEST_REVISION" = "true" ]; then
+            tags="$tags,$IMAGE:$RESTY_VERSION"
+          fi
+          if [ "$IS_LATEST" = "true" ]; then
+            tags="$tags,$IMAGE:latest"
+          fi
+          echo "pushing: $tags"
+          TAGS="$tags" docker buildx bake image \
+            --set "*.platform=$PLATFORMS" \
+            --set '*.cache-from=type=gha,scope=openresty' \
+            --set '*.cache-to=type=gha,scope=openresty,mode=max' \
+            --push
+          {
+            echo "### OpenResty $RESTY_VERSION image"
+            echo "upstream tag: \`$UPSTREAM_TAG\`"
+            echo
+            echo "$tags" | tr ',' '\n' | sed 's/^/- `/; s/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
