@@ -15,6 +15,39 @@
 -- Replace every example value below (app/namespace names, IP ranges,
 -- resolver IP, static_ranges zone map) with your own before deploying.
 
+local function read_file(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local v = f:read("*a")
+    f:close()
+    return v
+end
+
+local function read_trimmed(path)
+    local v = read_file(path)
+    v = v and v:match("^%s*(.-)%s*$")
+    if v == "" then return nil end
+    return v
+end
+
+-- First IPv4 nameserver in /etc/resolv.conf: in a pod that's the cluster DNS
+-- (CoreDNS, or NodeLocal DNSCache, which forwards in-addr.arpa to CoreDNS).
+local function first_nameserver()
+    local content = read_file("/etc/resolv.conf")
+    if not content then return nil end
+    for line in content:gmatch("[^\r\n]+") do
+        local ip = line:match("^%s*nameserver%s+(%d+%.%d+%.%d+%.%d+)")
+        if ip then return ip end
+    end
+    return nil
+end
+
+-- Read once per worker at startup from the pod's own mounts: no DNS, nothing
+-- hardcoded. The Service name has no local source, so it is discovered via PTR
+-- instead (http.discover_identity below, lib/self_identity.lua).
+local own_namespace  = read_trimmed("/var/run/secrets/kubernetes.io/serviceaccount/namespace") or "unknown"
+local own_nameserver = first_nameserver() or "10.233.0.3"
+
 return {
     -- per-app / per-destination metrics master switches (lib/app_toggle.lua)
     -- -- an app/destination with no entry here defaults to enabled. The
@@ -95,7 +128,7 @@ return {
         default_label     = "public",
         default_namespace = "unknown",
 
-        ptr_dns_server           = "10.233.0.3",  -- your CoreDNS ClusterIP; fetch per-cluster, do not hardcode in production
+        ptr_dns_server           = own_nameserver,  -- from /etc/resolv.conf; set an explicit IP to override
         ptr_dns_timeout          = 200,   -- ms; kept tight, falls back to defaults on timeout
         ptr_cache_ttl            = 15,    -- seconds, matches CoreDNS record TTL
         probe_default_service    = "health-probe",  -- fallback for unresolved dynamic-range addresses (often kubelet probes)
