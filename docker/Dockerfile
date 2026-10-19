@@ -1,4 +1,5 @@
-FROM openresty-base
+ARG OPENRESTY_TAG
+FROM openresty/openresty:${OPENRESTY_TAG}-alpine
 
 COPY prometheus.lua prometheus_keys.lua prometheus_resty_counter.lua /opt/prometheus/
 COPY lib/ /opt/prometheus/lib/
