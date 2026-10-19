@@ -232,10 +232,11 @@ needed for the Lua side.
 
 `.github/workflows/openresty-image.yml` watches
 [openresty/docker-openresty](https://github.com/openresty/docker-openresty/tags)
-every 6 hours. When a new `<openresty-version>-<revision>` tag appears, it
-builds that tag's `alpine/Dockerfile` with `RESTY_VERSION` taken from the tag,
-layers this repo on top (`docker/Dockerfile`, wired together by
-`docker-bake.hcl`), smoke-tests it, and pushes:
+every 6 hours. When a new `<openresty-version>-<revision>` tag appears and its
+official `openresty/openresty:<tag>-alpine` image is on Docker Hub, it layers
+this repo on top of that image (`docker/Dockerfile`), smoke-tests the result,
+and pushes. Nothing is compiled. If the tag is not on Docker Hub yet, the run
+skips and the next one checks again.
 
 | Tag | Meaning |
 |---|---|
@@ -245,7 +246,8 @@ layers this repo on top (`docker/Dockerfile`, wired together by
 | `ghcr.io/hatam-abolghasemi/nginx-lua-prometheus:latest` | newest upstream release |
 
 Pushes to `main` that touch the Lua or `docker/` rebuild the newest upstream
-release; `workflow_dispatch` builds any tag (OpenResty 1.31+).
+release; `workflow_dispatch` builds any tag (OpenResty 1.31+, for native
+CONNECT support).
 
 Inside the image:
 
@@ -261,16 +263,27 @@ Inside the image:
   and your `stream.conf` into `/etc/nginx/stream.d/` to turn it on.
 
 The forward proxy uses nginx's native CONNECT support
-(`ngx_http_tunnel_module`, nginx 1.31+, built by default), so
-`ngx_http_proxy_connect_module` and its core patch are no longer needed. That
-patch does not apply to nginx 1.31 anyway, so OpenResty 1.31 can't be built
-with it.
-
-Local build from the Docker Hub image, no source compile:
+(`ngx_http_tunnel_module`, nginx 1.31+, built by default), so no third-party
+module or core patch is needed. CONNECT goes to `tunnel_pass`, everything else
+to `proxy_pass`:
 
 ```
-docker buildx build \
-  --build-context openresty-base=docker-image://openresty/openresty:1.31.1.1-4-alpine \
+location / {
+    if ($request_method = CONNECT) {
+        tunnel_pass;
+    }
+    proxy_pass http://$http_host$request_uri;
+}
+```
+
+`tunnel_pass` handles only CONNECT (405 otherwise) and a location takes one
+handler, so the `if` is what lets one listener serve both. This replaces
+`ngx_http_proxy_connect_module`, whose upstream patch stops at nginx 1.27.
+
+Local build:
+
+```
+docker buildx build --build-arg OPENRESTY_TAG=1.31.1.1-4 \
   -f docker/Dockerfile -t openresty-prometheus:local .
 ```
 
@@ -280,6 +293,17 @@ docker buildx build \
 
 Dated entries for this fork's own additions. Upstream's `CHANGELOG.md` is
 unaffected — none of its files are touched here.
+
+### 2026-10-19
+
+- The image is now `FROM openresty/openresty:<tag>-alpine` (official, current
+  Alpine) instead of compiling docker-openresty's `alpine/Dockerfile`:
+  `docker-bake.hcl` is gone, builds take seconds, and a release is built once
+  its official image is on Docker Hub. The forward proxy stays on nginx's
+  native CONNECT support, with no third-party module.
+- `lib/http_metrics.lua`: requests nginx rejects before the access phase (400,
+  405, 413, `deny`) are recorded with `source_service="unknown"` instead of
+  failing with "incorrect label count".
 
 ### 2026-10-17
 
