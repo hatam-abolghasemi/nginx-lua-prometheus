@@ -249,7 +249,11 @@ function _M.record()
     local mode     = cfg.label_mode and request_mode or nil
     local route    = route_sanitizer.sanitize(ngx.var.request_uri, cfg.sanitize)
 
-    local labels = build_labels(method, route, status, subnet, host, mode, ngx.ctx.source_service, ngx.ctx.source_namespace)
+    -- nil when nginx answered before the access phase ran (400, 413, `deny`)
+    local source_service   = ngx.ctx.source_service or "unknown"
+    local source_namespace = ngx.ctx.source_namespace or "unknown"
+
+    local labels = build_labels(method, route, status, subnet, host, mode, source_service, source_namespace)
 
     if metric_requests           then metric_requests:inc(1, labels)             end
     if metric_latency            then metric_latency:set(req_time, labels)       end
