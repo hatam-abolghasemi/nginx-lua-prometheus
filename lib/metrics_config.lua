@@ -136,6 +136,17 @@ return {
         waypoint_service_name    = "waypoint",  -- must match the Service name your mesh's waypoint Gateway creates
     },
 
+    -- HTTPS interception for the forward-proxy leg (lib/tls_intercept.lua +
+    -- the :3129 server in default.conf). Only consulted when interception is
+    -- switched on by mounting an /etc/nginx/intercept/ports/*.map entry; the
+    -- CA below must be mounted into the nginx container ONLY (never the app).
+    intercept = {
+        ca_cert_path = "/etc/nginx/intercept/ca.crt",
+        ca_key_path  = "/etc/nginx/intercept/ca.key",
+        cert_ttl     = 86400,  -- seconds a minted leaf is valid and cached
+        leaf_bits    = 2048,
+    },
+
     stream = {
         expiry_window     = 10,
         expiry_scan_limit = 10000,
