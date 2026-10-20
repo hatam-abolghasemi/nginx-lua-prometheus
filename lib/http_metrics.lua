@@ -228,12 +228,11 @@ end
 -- log_by_lua_block -- record request/response/connection metrics
 -- ============================================================
 function _M.record()
-    -- Requests intercepted at :3128 (CONNECT to a TLS port) are handed to the
-    -- :3129 terminator, which records the decrypted request in full -- method,
-    -- route, status, timing. Skip the opaque outer CONNECT here so each call is
-    -- counted exactly once. $do_intercept is "1" only on that intercepted leg
-    -- (the http-level map in default.conf), and nil/"0" everywhere else.
-    if ngx.var.do_intercept == "1" then return end
+    -- A CONNECT we intercept is handed to the :3129 terminator, which records
+    -- the decrypted request in full (method, route, status, timing). Skip the
+    -- opaque outer CONNECT here so each call is counted exactly once. The same
+    -- decision drives tunnel routing in default.conf, so the two never diverge.
+    if require("intercept").should() then return end
 
     -- forward-proxy master switch: skip recording entirely for outbound
     -- (mode=1) traffic when disabled in metrics_config.apps.forward_proxy -- the proxy

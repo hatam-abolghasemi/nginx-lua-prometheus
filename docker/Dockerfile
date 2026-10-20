@@ -10,6 +10,7 @@ RUN apk add --no-cache openssl ca-certificates \
 COPY prometheus.lua prometheus_keys.lua prometheus_resty_counter.lua /opt/prometheus/
 COPY lib/ /opt/prometheus/lib/
 COPY docker/nginx.conf /etc/nginx/nginx.conf
+COPY docker/main.d/ /etc/nginx/main.d/
 COPY docker/conf.d/ /etc/nginx/conf.d/
 
 RUN ln -sf /etc/nginx/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf \
