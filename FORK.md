@@ -294,6 +294,24 @@ docker buildx build --build-arg OPENRESTY_TAG=1.31.1.1-4 \
 Dated entries for this fork's own additions. Upstream's `CHANGELOG.md` is
 unaffected — none of its files are touched here.
 
+>### 2026-10-20
+
+- Forward proxy can now optionally **intercept HTTPS** to record real
+  method/route/status instead of only `CONNECT host:port`. A CONNECT to an
+  intercepted TLS port is tunnelled to a loopback terminator (`127.0.0.1:3129`)
+  that mints a per-SNI leaf cert (`lib/tls_intercept.lua`, signed by a mounted
+  CA), reads the decrypted request, and re-originates to the true destination
+  over a **verified** TLS connection (`proxy_ssl_verify on`). Off by default:
+  with no `/etc/nginx/intercept/ports/*.map` entry mounted, `$tls_port` is
+  always 0, nothing routes to `:3129`, and the image stays a transparent
+  pass-through proxy. The intercepted outer CONNECT is not double-counted --
+  `record()` skips it (`$do_intercept`), so each call is counted once at
+  `:3129`. The CA key is mounted into the nginx container only; the app trusts
+  `ca.crt` alone. `examples/.../k8s/` gains a runnable PHP test
+  (`intercept-php-test.yaml`). Known limits (deferred): only configured TLS
+  ports are intercepted (443 to start) and re-originated on their default port;
+  outbound mTLS / cert-pinning destinations need a `bypass/*.map` entry.
+
 ### 2026-10-19
 
 - The image is now `FROM openresty/openresty:<tag>-alpine` (official, current
